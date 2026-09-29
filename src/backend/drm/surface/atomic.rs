@@ -1238,9 +1238,17 @@ impl<'a> AtomicRequest<'a> {
                 });
             }
             if self.mapping.plane_prop_handle(handle, "alpha").is_ok() {
+                // The kernel documents `alpha` as 0..=0xffff, but downstream drivers
+                // (Qualcomm sde) expose 0..=255 and reject larger values: scale to
+                // the range the driver actually reports.
+                let max = self
+                    .mapping
+                    .plane_range_max(handle, "alpha")
+                    .filter(|m| *m > 0)
+                    .unwrap_or(u16::MAX as u64);
                 plane_props.insert(
                     "alpha",
-                    property::Value::UnsignedRange((config.alpha * u16::MAX as f32).round() as u64),
+                    property::Value::UnsignedRange((config.alpha as f64 * max as f64).round() as u64),
                 );
             } else if config.alpha != 1.0 {
                 // if we are missing the alpha property we can not display any transparent alpha values

@@ -28,9 +28,20 @@ pub struct PropMapping {
     pub connectors: HashMap<connector::Handle, HashMap<String, property::Handle>>,
     pub crtcs: HashMap<crtc::Handle, HashMap<String, property::Handle>>,
     pub planes: HashMap<plane::Handle, HashMap<String, property::Handle>>,
+    /// Value ranges of range-typed plane properties (`alpha` is 0..=65535 on most
+    /// drivers, but 0..=255 on some downstream ones, e.g. Qualcomm sde).
+    pub plane_ranges: HashMap<plane::Handle, HashMap<String, (u64, u64)>>,
 }
 
 impl PropMapping {
+    /// Maximum value of a range-typed plane property, if the driver reports one.
+    pub(crate) fn plane_range_max(&self, handle: plane::Handle, name: &str) -> Option<u64> {
+        self.plane_ranges
+            .get(&handle)
+            .and_then(|m| m.get(name))
+            .map(|(_, max)| *max)
+    }
+
     pub(crate) fn conn_prop_handle(
         &self,
         handle: connector::Handle,
@@ -134,6 +145,9 @@ impl AtomicDrmDevice {
         map_props(&dev.fd, res_handles.connectors(), &mut mapping.connectors)?;
         map_props(&dev.fd, res_handles.crtcs(), &mut mapping.crtcs)?;
         map_props(&dev.fd, &planes, &mut mapping.planes)?;
+        let mut plane_ranges = HashMap::new();
+        map_plane_ranges(&dev.fd, &mapping.planes, &mut plane_ranges);
+        mapping.plane_ranges = plane_ranges;
 
         dev.old_state = old_state;
         trace!("Mapping: {:#?}", mapping);
@@ -303,6 +317,27 @@ where
                 source,
             })
         })
+}
+
+/// Record the value ranges of range-typed plane properties.
+pub(in crate::backend::drm) fn map_plane_ranges<D>(
+    fd: &D,
+    planes: &HashMap<plane::Handle, HashMap<String, property::Handle>>,
+    ranges: &mut HashMap<plane::Handle, HashMap<String, (u64, u64)>>,
+) where
+    D: ControlDevice,
+{
+    for (plane, props) in planes {
+        let mut map = HashMap::new();
+        for (name, prop) in props {
+            if let Ok(info) = fd.get_property(*prop) {
+                if let property::ValueType::UnsignedRange(min, max) = info.value_type() {
+                    map.insert(name.clone(), (min, max));
+                }
+            }
+        }
+        ranges.insert(*plane, map);
+    }
 }
 
 /// Create a mapping of property names and handles for given handles of a given drm resource type.
