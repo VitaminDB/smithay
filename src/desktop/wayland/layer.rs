@@ -267,7 +267,27 @@ impl LayerMap {
             let mut zone = output_rect;
             trace!("Arranging layers into {:?}", output_rect.size);
 
-            for layer in self.layers.iter() {
+            // Surfaces that reserve space are arranged before the rest,
+            // whatever their mapping order: a surface with a neutral exclusive
+            // zone (0) then respects zones that appeared after it was mapped
+            // (an on-screen keyboard shown while a shell sheet is open), instead
+            // of keeping the full output and covering the keyboard.
+            let mut order: Vec<&LayerSurface> = self.layers.iter().collect();
+            order.sort_by_key(|layer| {
+                let exclusive = with_states(layer.wl_surface(), |states| {
+                    matches!(
+                        states
+                            .cached_state
+                            .get::<LayerSurfaceCachedState>()
+                            .current()
+                            .exclusive_zone,
+                        ExclusiveZone::Exclusive(_)
+                    )
+                });
+                !exclusive
+            });
+
+            for layer in order {
                 let surface = layer.wl_surface();
 
                 with_surface_tree_downward(
