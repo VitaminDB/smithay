@@ -724,6 +724,7 @@ impl AtomicDrmSurface {
             AtomicCommitFlags::TEST_ONLY
         };
         self.fd.atomic_commit(flags, req.build()?).map_err(|source| {
+            debug!(?req, ?flags, "atomic test failed: {source}");
             Error::Access(AccessError {
                 errmsg: "Error testing state",
                 dev: self.fd.dev_path(),
