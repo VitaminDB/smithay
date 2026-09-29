@@ -1307,7 +1307,8 @@ impl<'a> AtomicRequest<'a> {
             );
         }
         if self.mapping.plane_prop_handle(plane, "alpha").is_ok() {
-            plane_props.insert("alpha", property::Value::UnsignedRange(0xffff));
+            let max = self.mapping.plane_range_max(plane, "alpha").filter(|m| *m > 0).unwrap_or(0xffff);
+            plane_props.insert("alpha", property::Value::UnsignedRange(max));
         }
         if self.mapping.plane_prop_handle(plane, "FB_DAMAGE_CLIPS").is_ok() {
             plane_props.insert("FB_DAMAGE_CLIPS", property::Value::Blob(0));
@@ -1495,10 +1496,16 @@ impl<'a> AtomicRequest<'a> {
                 });
             }
             if let Ok(prop) = self.mapping.plane_prop_handle(handle, "alpha") {
+                // Downstream drivers (Qualcomm sde) expose alpha as 0..=255, not 0..=0xffff.
+                let max = self
+                    .mapping
+                    .plane_range_max(handle, "alpha")
+                    .filter(|m| *m > 0)
+                    .unwrap_or(u16::MAX as u64);
                 self.request.add_property(
                     handle,
                     prop,
-                    property::Value::UnsignedRange((config.alpha * u16::MAX as f32).round() as u64),
+                    property::Value::UnsignedRange((config.alpha as f64 * max as f64).round() as u64),
                 );
             } else if config.alpha != 1.0 {
                 // if we are missing the alpha property we can not display any transparent alpha values
@@ -1602,8 +1609,8 @@ impl<'a> AtomicRequest<'a> {
             );
         }
         if let Ok(prop) = self.mapping.plane_prop_handle(plane, "alpha") {
-            self.request
-                .add_property(plane, prop, property::Value::UnsignedRange(0xffff));
+            let max = self.mapping.plane_range_max(plane, "alpha").filter(|m| *m > 0).unwrap_or(0xffff);
+            self.request.add_property(plane, prop, property::Value::UnsignedRange(max));
         }
         if let Ok(prop) = self.mapping.plane_prop_handle(plane, "FB_DAMAGE_CLIPS") {
             self.request.add_property(plane, prop, property::Value::Blob(0));
