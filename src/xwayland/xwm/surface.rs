@@ -284,9 +284,9 @@ impl X11Surface {
     pub fn configure_with_client_size(
         &self,
         rect: Rectangle<i32, Logical>,
-        client_size: Size<i32, Client>,
+        client_size: (i32, i32),
     ) -> Result<(), X11SurfaceError> {
-        self.configure_inner(Some(rect), Some(client_size))
+        self.configure_inner(Some(rect), Some(client_size.into()))
     }
 
     fn configure_inner(
