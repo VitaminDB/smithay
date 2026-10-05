@@ -272,7 +272,28 @@ impl X11Surface {
     /// If `rect` is provided the new state will be send to the window.
     /// If `rect` is `None` a synthetic configure event with the existing state will be send.
     pub fn configure(&self, rect: impl Into<Option<Rectangle<i32, Logical>>>) -> Result<(), X11SurfaceError> {
-        let rect = rect.into();
+        self.configure_inner(rect.into(), None)
+    }
+
+    /// Send a configure to this window with an exact size in X11 (client) pixels.
+    ///
+    /// With a fractional client scale a logical size cannot always express the
+    /// wanted size in X11 pixels (an output of 2712 px at scale 2.35 is 1154.04
+    /// logical pixels wide): this lets the compositor give a window exactly the
+    /// pixel size of an output. The position is still taken from `rect`.
+    pub fn configure_with_client_size(
+        &self,
+        rect: Rectangle<i32, Logical>,
+        client_size: Size<i32, Client>,
+    ) -> Result<(), X11SurfaceError> {
+        self.configure_inner(Some(rect), Some(client_size))
+    }
+
+    fn configure_inner(
+        &self,
+        rect: Option<Rectangle<i32, Logical>>,
+        client_size: Option<Size<i32, Client>>,
+    ) -> Result<(), X11SurfaceError> {
         if self.is_override_redirect() && rect.is_some() {
             return Err(X11SurfaceError::UnsupportedForOverrideRedirect);
         }
@@ -285,7 +306,10 @@ impl X11Surface {
                 .map(|s| s.load(Ordering::Acquire))
                 .unwrap_or(1.);
             let logical_rect = rect.unwrap_or(state.geometry);
-            let rect = logical_rect.to_client_precise_round(client_scale);
+            let mut rect = logical_rect.to_client_precise_round(client_scale);
+            if let Some(size) = client_size {
+                rect.size = size;
+            }
             let aux = ConfigureWindowAux::default()
                 .x(rect.loc.x)
                 .y(rect.loc.y)
