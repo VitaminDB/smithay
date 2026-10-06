@@ -3924,7 +3924,17 @@ where
         // Try to assign the element to a plane
         trace!("testing direct scan-out for element {:?} on {:?} with zpos {:?}: fb: {:?}, element_geometry: {:?}", element_id, plane.handle, plane.zpos, &element_config.buffer.fb, element_config.geometry);
 
-        if !plane.formats.contains(&element_config.properties.format) {
+        // A plane without IN_FORMATS (e.g. Qualcomm msm_drm/sde) only lists implicit modifiers.
+        // A buffer of the same code with an explicit modifier (UBWC) may still be accepted:
+        // let the atomic test commit decide instead of rejecting it here.
+        let format = element_config.properties.format;
+        let implicit_only = plane.formats.iter().all(|f| f.modifier == DrmModifier::Invalid);
+        let supported = plane.formats.contains(&format)
+            || (implicit_only
+                && plane
+                    .formats
+                    .contains(&DrmFormat { code: format.code, modifier: DrmModifier::Invalid }));
+        if !supported {
             trace!(
                 "skipping direct scan-out on {:?} with zpos {:?} for element {:?}, format {:?} not supported",
                 plane.handle,
