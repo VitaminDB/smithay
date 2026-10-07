@@ -1484,10 +1484,17 @@ where
             .map(|fmt| fmt.modifier)
             .collect::<IndexSet<_>>();
 
-        let swapchain_modifiers = plane_modifiers
-            .intersection(&modifiers)
-            .copied()
-            .collect::<Vec<_>>();
+        // A plane without IN_FORMATS only lists the implicit modifier; explicit modifiers
+        // passed in are tried as-is, the test commit below decides.
+        let implicit_only = plane_modifiers.iter().all(|m| *m == DrmModifier::Invalid);
+        let swapchain_modifiers = if implicit_only {
+            modifiers.iter().copied().collect::<Vec<_>>()
+        } else {
+            plane_modifiers
+                .intersection(&modifiers)
+                .copied()
+                .collect::<Vec<_>>()
+        };
 
         if swapchain_modifiers.is_empty() {
             return Err((allocator, FrameError::NoSupportedPlaneFormat));
@@ -1659,6 +1666,38 @@ where
         };
 
         debug!("Testing Formats: {:?}", formats);
+
+        // Plane without IN_FORMATS (implicit modifier only, e.g. Qualcomm msm_drm/sde): first try the
+        // renderer's explicit modifiers (compressed layouts such as UBWC), fall back to implicit.
+        let allocator = if plane_modifiers.iter().all(|m| *m == DrmModifier::Invalid) {
+            let explicit = renderer_modifiers
+                .iter()
+                .copied()
+                .filter(|m| *m != DrmModifier::Invalid)
+                .collect::<Vec<_>>();
+            if explicit.is_empty() {
+                allocator
+            } else {
+                debug!("Testing explicit modifiers on implicit-only plane: {:?}", explicit);
+                match Self::test_format(
+                    &drm,
+                    supports_fencing,
+                    planes,
+                    allocator,
+                    framebuffer_exporter,
+                    code,
+                    explicit,
+                ) {
+                    Ok(res) => return Ok(res),
+                    Err((allocator, err)) => {
+                        debug!("Explicit modifiers failed ({err}), falling back to implicit");
+                        allocator
+                    }
+                }
+            }
+        } else {
+            allocator
+        };
 
         let modifiers = formats.iter().map(|x| x.modifier).collect::<Vec<_>>();
 
