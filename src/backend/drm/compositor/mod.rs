@@ -2329,12 +2329,17 @@ where
                         if let Some(render_damage) = render_output_result.damage {
                             trace!("rendering damage: {:?}", render_damage);
 
+                            // Render damage is in output space (transformed size); the plane's framebuffer
+                            // and FB_DAMAGE_CLIPS are in buffer space — apply the render transform like the
+                            // renderers do. Otherwise a rotated output only damages a clipped, unrotated part
+                            // of the buffer (drivers that copy damage only, e.g. simpledrm, show stale pixels).
+                            let render_damage: Vec<Rectangle<i32, Physical>> = render_damage
+                                .iter()
+                                .map(|d| output_transform.transform_rect_in(*d, &output_geometry.size))
+                                .collect();
+
                             self.primary_plane_damage_bag.add(render_damage.iter().map(|d| {
-                                d.to_logical(1).to_buffer(
-                                    1,
-                                    Transform::Normal,
-                                    &output_geometry.size.to_logical(1),
-                                )
+                                d.to_logical(1).to_buffer(1, Transform::Normal, &current_size.to_logical(1))
                             }));
                             config.damage_clips = PlaneDamageClips::from_damage(
                                 self.surface.device_fd(),
@@ -2359,10 +2364,10 @@ where
                             "clearing previous direct scan-out on primary plane, damaging complete output"
                         );
                         self.primary_plane_damage_bag
-                            .add([output_geometry.to_logical(1).to_buffer(
+                            .add([Rectangle::from_size(current_size).to_logical(1).to_buffer(
                                 1,
                                 Transform::Normal,
-                                &output_geometry.size.to_logical(1),
+                                &current_size.to_logical(1),
                             )]);
 
                         config.sync = Some((render_output_result.sync.clone(), None));
