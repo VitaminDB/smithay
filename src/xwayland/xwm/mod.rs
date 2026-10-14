@@ -1447,6 +1447,15 @@ where
                 return Ok(());
             }
 
+            // InputOnly windows have no content and never get a wl_surface: as windows they only covered what is
+            // below (Wine maps one over the emulated display mode area — a black, input eating rectangle).
+            match conn.get_window_attributes(n.window)?.reply() {
+                Ok(attrs) if attrs.class == WindowClass::INPUT_ONLY => return Ok(()),
+                Ok(_) => {}
+                // already destroyed
+                Err(_) => return Ok(()),
+            }
+
             let geo = conn.get_geometry(n.window)?.reply()?;
             let geometry = Rectangle::<i32, Client>::new(
                 (geo.x as i32, geo.y as i32).into(),
