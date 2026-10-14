@@ -1024,10 +1024,15 @@ impl IsAlive for X11Surface {
     }
 }
 
-impl<D: SeatHandler + 'static> KeyboardTarget<D> for X11Surface {
-    fn enter(&self, seat: &Seat<D>, data: &mut D, keys: Vec<KeysymHandle<'_>>, serial: Serial) {
+impl X11Surface {
+    /// Give this window the X11 input focus (`XSetInputFocus` and/or `WM_TAKE_FOCUS` by its input mode).
+    ///
+    /// Done by [`KeyboardTarget::enter`] of the `X11Surface`. A compositor that sets the keyboard focus to the
+    /// window's `WlSurface` instead calls this itself, else X11 clients never get the focus (Xwayland keeps the
+    /// X server default, PointerRoot). Returns `false` for windows that take no input.
+    pub fn focus_input(&self) -> bool {
         let (set_input_focus, send_take_focus) = match self.input_mode() {
-            InputMode::None => return,
+            InputMode::None => return false,
             InputMode::Passive => (true, false),
             InputMode::LocallyActive => (true, true),
             // ICCCM leaves the focus to a globally active client, but Wine answers WM_TAKE_FOCUS with CurrentTime
@@ -1057,27 +1062,42 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for X11Surface {
                         self.window, err
                     );
                 }
-                let _ = conn.flush();
             }
 
             let _ = conn.flush();
         }
+        true
+    }
 
+    /// Take the X11 input focus away from this window (counterpart of [`X11Surface::focus_input`]).
+    pub fn unfocus_input(&self) -> bool {
+        if self.input_mode() == InputMode::None {
+            return false;
+        }
+        if let Some(conn) = self.conn.upgrade() {
+            if let Err(err) = conn.set_input_focus(InputFocus::NONE, x11rb::NONE, x11rb::CURRENT_TIME) {
+                warn!("Unable to unfocus X11Surface ({:?}): {}", self.window, err);
+            }
+            let _ = conn.flush();
+        }
+        true
+    }
+}
+
+impl<D: SeatHandler + 'static> KeyboardTarget<D> for X11Surface {
+    fn enter(&self, seat: &Seat<D>, data: &mut D, keys: Vec<KeysymHandle<'_>>, serial: Serial) {
+        if !self.focus_input() {
+            return;
+        }
         if let Some(surface) = self.state.lock().unwrap().wl_surface.as_ref() {
             KeyboardTarget::enter(surface, seat, data, keys, serial);
         }
     }
 
     fn leave(&self, seat: &Seat<D>, data: &mut D, serial: Serial) {
-        if self.input_mode() == InputMode::None {
+        if !self.unfocus_input() {
             return;
-        } else if let Some(conn) = self.conn.upgrade() {
-            if let Err(err) = conn.set_input_focus(InputFocus::NONE, x11rb::NONE, x11rb::CURRENT_TIME) {
-                warn!("Unable to unfocus X11Surface ({:?}): {}", self.window, err);
-            }
-            let _ = conn.flush();
         }
-
         if let Some(surface) = self.state.lock().unwrap().wl_surface.as_ref() {
             KeyboardTarget::leave(surface, seat, data, serial);
         }
