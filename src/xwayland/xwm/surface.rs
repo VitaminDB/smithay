@@ -1030,7 +1030,11 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for X11Surface {
             InputMode::None => return,
             InputMode::Passive => (true, false),
             InputMode::LocallyActive => (true, true),
-            InputMode::GloballyActive => (false, true),
+            // ICCCM leaves the focus to a globally active client, but Wine answers WM_TAKE_FOCUS with CurrentTime
+            // only when no other window got the focus later, and ignores it while WM_STATE changes (just mapped):
+            // a game started after its splash window never got the focus, and DirectInput released all input.
+            // The compositor decides the focus anyway, so set it as for locally active clients.
+            InputMode::GloballyActive => (true, true),
         };
 
         if let Some(conn) = self.conn.upgrade() {
