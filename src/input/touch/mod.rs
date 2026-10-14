@@ -620,11 +620,13 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
     }
 
     fn cancel(&mut self, data: &mut D, seat: &Seat<D>, seq: Serial) {
+        // Unlike frame, cancel must reach every touch point that still has a focus, even if
+        // its last events were already followed by a frame (the usual case): otherwise the
+        // client never learns the sequence is gone and keeps a stuck touch point.
         for state in self.focus.values_mut() {
-            if state.current.map(|c| c >= state.pending).unwrap_or(false) {
-                continue;
-            }
+            state.pending = seq;
             state.current = Some(seq);
+            state.frame_pending = None;
             if let Some((focus, _)) = state.focus.take() {
                 focus.cancel(seat, data, seq);
             }
