@@ -1007,6 +1007,15 @@ impl X11Surface {
     }
 }
 
+/// The X server's current time: Xwayland runs on the same machine, and its timestamps are
+/// milliseconds of the monotonic clock (`GetTimeInMillis`). The coarse clock, as the server uses
+/// when it is fine enough: a time ahead of the server's would make it ignore the client's
+/// `SetInputFocus` with that time.
+pub(crate) fn x11_server_time() -> u32 {
+    let ts = rustix::time::clock_gettime(rustix::time::ClockId::MonotonicCoarse);
+    (ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000) as u32
+}
+
 /// Trait for objects, that represent an x11 window in some shape or form
 /// and can be tested for equality.
 pub trait X11Relatable {
@@ -1067,11 +1076,14 @@ impl X11Surface {
             }
 
             if send_take_focus {
+                // A real timestamp, not CurrentTime: Wine takes WM_TAKE_FOCUS with CurrentTime only while no other
+                // window got the focus later -- a window restored after another one (its desktop) had the focus
+                // never became the foreground window again, and a game paused when minimized stayed paused.
                 let event = ClientMessageEvent::new(
                     32,
                     self.window,
                     self.atoms.WM_PROTOCOLS,
-                    [self.atoms.WM_TAKE_FOCUS, x11rb::CURRENT_TIME, 0, 0, 0],
+                    [self.atoms.WM_TAKE_FOCUS, x11_server_time(), 0, 0, 0],
                 );
                 if let Err(err) = conn.send_event(false, self.window, EventMask::NO_EVENT, event) {
                     warn!(
