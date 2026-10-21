@@ -551,6 +551,34 @@ impl X11Surface {
         Ok(())
     }
 
+    /// Sets the window as minimized (ICCCM `WM_STATE` IconicState, `_NET_WM_STATE_HIDDEN`) or normal again.
+    ///
+    /// The window stays mapped: under Xwayland unmapping would take its `wl_surface` away, and a compositor
+    /// just stops showing a minimized window. Clients asking to be iconified (`WM_CHANGE_STATE`, Wine for a
+    /// fullscreen window losing the focus) wait for `WM_STATE` to change; Wine ignores the focus until it does.
+    pub fn set_minimized(&self, minimized: bool) -> Result<(), ConnectionError> {
+        if self.is_override_redirect() {
+            return Ok(());
+        }
+        if let Some(conn) = self.conn.upgrade() {
+            let property = [if minimized { 3u32 /*IconicState*/ } else { 1 /*NormalState*/ }, 0 /*WINDOW_NONE*/];
+            conn.change_property32(
+                PropMode::REPLACE,
+                self.window,
+                self.atoms.WM_STATE,
+                self.atoms.WM_STATE,
+                &property,
+            )?;
+            conn.flush()?;
+        }
+        if minimized {
+            self.change_net_state(&[self.atoms._NET_WM_STATE_HIDDEN], &[])?;
+        } else {
+            self.change_net_state(&[], &[self.atoms._NET_WM_STATE_HIDDEN])?;
+        }
+        Ok(())
+    }
+
     /// Sets the window as suspended/hidden or not.
     ///
     /// Allows the client to e.g. stop rendering.
