@@ -2244,23 +2244,24 @@ where
             }
         }
         Event::FocusIn(n) => {
-            conn.change_property32(
-                PropMode::REPLACE,
-                xwm.screen.root,
-                xwm.atoms._NET_ACTIVE_WINDOW,
-                AtomEnum::WINDOW,
-                &[n.event],
-            )?;
+            // A client moving the focus between its own managed windows. Not the root or other windows (focus
+            // set to None or PointerRoot), and not on FocusOut (that is the window losing the focus): Wine 11
+            // takes its foreground window from _NET_ACTIVE_WINDOW, and the root there made its desktop the
+            // foreground -- a fullscreen game restored after being minimized minimized itself again.
+            if n.mode != x11rb::protocol::xproto::NotifyMode::GRAB
+                && n.mode != x11rb::protocol::xproto::NotifyMode::UNGRAB
+                && xwm.windows.iter().any(|w| w.window_id() == n.event && !w.is_override_redirect())
+            {
+                conn.change_property32(
+                    PropMode::REPLACE,
+                    xwm.screen.root,
+                    xwm.atoms._NET_ACTIVE_WINDOW,
+                    AtomEnum::WINDOW,
+                    &[n.event],
+                )?;
+            }
         }
-        Event::FocusOut(n) => {
-            conn.change_property32(
-                PropMode::REPLACE,
-                xwm.screen.root,
-                xwm.atoms._NET_ACTIVE_WINDOW,
-                AtomEnum::WINDOW,
-                &[n.event],
-            )?;
-        }
+        Event::FocusOut(_) => {}
         Event::ClientMessage(msg) => {
             if let Some(reply) = conn.get_atom_name(msg.type_)?.reply_unchecked()? {
                 debug!(

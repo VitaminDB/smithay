@@ -1035,6 +1035,20 @@ impl X11Surface {
     }
 }
 
+/// `_NET_ACTIVE_WINDOW` on the root window: the window the WM gave the focus to, or none.
+pub(crate) fn set_net_active_window(conn: &RustConnection, atoms: &super::Atoms, window: X11Window) {
+    let Some(root) = conn.setup().roots.first().map(|s| s.root) else { return };
+    if let Err(err) = conn.change_property32(
+        PropMode::REPLACE,
+        root,
+        atoms._NET_ACTIVE_WINDOW,
+        AtomEnum::WINDOW,
+        &[window],
+    ) {
+        warn!("Unable to set _NET_ACTIVE_WINDOW ({:?}): {}", window, err);
+    }
+}
+
 /// The X server's current time: Xwayland runs on the same machine, and its timestamps are
 /// milliseconds of the monotonic clock (`GetTimeInMillis`). The coarse clock, as the server uses
 /// when it is fine enough: a time ahead of the server's would make it ignore the client's
@@ -1103,6 +1117,10 @@ impl X11Surface {
                 }
             }
 
+            // The WM's active window is the one it gives the focus to (EWMH _NET_ACTIVE_WINDOW): Wine 11
+            // takes its foreground window from it.
+            set_net_active_window(&conn, &self.atoms, self.window);
+
             if send_take_focus {
                 // A real timestamp, not CurrentTime: Wine takes WM_TAKE_FOCUS with CurrentTime only while no other
                 // window got the focus later -- a window restored after another one (its desktop) had the focus
@@ -1135,6 +1153,7 @@ impl X11Surface {
             if let Err(err) = conn.set_input_focus(InputFocus::NONE, x11rb::NONE, x11rb::CURRENT_TIME) {
                 warn!("Unable to unfocus X11Surface ({:?}): {}", self.window, err);
             }
+            set_net_active_window(&conn, &self.atoms, x11rb::NONE);
             let _ = conn.flush();
         }
         true
