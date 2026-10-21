@@ -968,7 +968,8 @@ impl X11Surface {
             .ok()?
             .reply()
             .ok()?;
-        reply.value32()?.next()
+        let value = reply.value32()?.next();
+        value
     }
 
     /// Get the client PID associated with the X11 window.
