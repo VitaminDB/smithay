@@ -955,6 +955,22 @@ impl X11Surface {
         conn.flush()
     }
 
+    /// Read a 32-bit `CARDINAL` property of the window from the X server (one round trip), e.g. a marker a
+    /// client sets on its windows. `None` if the window, the atom or the property does not exist.
+    pub fn cardinal_property(&self, name: &str) -> Option<u32> {
+        let conn = self.conn.upgrade()?;
+        let atom = conn.intern_atom(true, name.as_bytes()).ok()?.reply().ok()?.atom;
+        if atom == x11rb::NONE {
+            return None;
+        }
+        let reply = conn
+            .get_property(false, self.window, atom, AtomEnum::CARDINAL, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?;
+        reply.value32()?.next()
+    }
+
     /// Get the client PID associated with the X11 window.
     pub fn get_client_pid(&self) -> Result<u32, Box<dyn std::error::Error>> {
         if let Some(connection) = self.conn.upgrade() {
