@@ -43,6 +43,10 @@ pub struct State {
     pub blob: property::Value<'static>,
     pub vrr: bool,
     pub connectors: HashSet<connector::Handle>,
+    /// Extra connector properties set by the compositor (`Colorspace`, `max bpc`,
+    /// `HDR_OUTPUT_METADATA`, ...). A change makes the state differ, so the next frame is a full
+    /// (modeset-capable) commit that carries them.
+    pub conn_props: Vec<(connector::Handle, &'static str, property::Value<'static>)>,
 }
 
 impl PartialEq for State {
@@ -52,6 +56,7 @@ impl PartialEq for State {
             && self.mode == other.mode
             && self.vrr == other.vrr
             && self.connectors == other.connectors
+            && self.conn_props == other.conn_props
     }
 }
 
@@ -149,6 +154,7 @@ impl State {
             // If we don't know the VRR state, the driver doesn't support the property
             vrr: vrr.unwrap_or(false),
             connectors: current_connectors,
+            conn_props: Vec::new(),
         })
     }
 
@@ -156,6 +162,7 @@ impl State {
         self.mode = unsafe { std::mem::zeroed() };
         self.blob = property::Value::Unknown(0);
         self.connectors.clear();
+        self.conn_props.clear();
         self.active = false;
         self.vrr = false;
     }
@@ -206,6 +213,7 @@ impl AtomicDrmSurface {
             blob,
             vrr: false,
             connectors: connectors.iter().copied().collect(),
+            conn_props: Vec::new(),
         };
 
         drop(_guard);
@@ -677,6 +685,31 @@ impl AtomicDrmSurface {
         *self.pending.read().unwrap() != *self.state.read().unwrap()
     }
 
+    /// Set (or with `None` drop) an extra property of a connector of this surface, e.g.
+    /// `Colorspace`, `max bpc` or `HDR_OUTPUT_METADATA` (a blob id). It is applied with the next
+    /// frame, which becomes a full commit allowing a modeset; dropping it leaves the connector's
+    /// value as last committed.
+    pub fn set_connector_property(
+        &self,
+        conn: connector::Handle,
+        name: &'static str,
+        value: Option<property::Value<'static>>,
+    ) -> Result<(), Error> {
+        self.ensure_props_known(&[conn])?;
+        self.prop_mapping.read().unwrap().conn_prop_handle(conn, name)?;
+        let mut pending = self.pending.write().unwrap();
+        pending.conn_props.retain(|(c, n, _)| !(*c == conn && *n == name));
+        if let Some(v) = value {
+            pending.conn_props.push((conn, name, v));
+        }
+        Ok(())
+    }
+
+    /// Extra connector properties pending for the next commit.
+    pub fn connector_properties(&self) -> Vec<(connector::Handle, &'static str, property::Value<'static>)> {
+        self.pending.read().unwrap().conn_props.clone()
+    }
+
     #[instrument(level = "trace", parent = &self.span, skip(self, planes))]
     #[profiling::function]
     pub fn test_state<'a>(
@@ -717,6 +750,10 @@ impl AtomicDrmSurface {
             removed,
             &*planes,
         )?;
+        let mut req = req;
+        for (conn, name, value) in &pending.conn_props {
+            req.set_connector_prop(*conn, name, *value)?;
+        }
 
         let flags = if allow_modeset {
             AtomicCommitFlags::ALLOW_MODESET | AtomicCommitFlags::TEST_ONLY
@@ -781,7 +818,7 @@ impl AtomicDrmSurface {
         // test the new config and return the request if it would be accepted by the driver.
         let prop_mapping = self.prop_mapping.read().unwrap();
         let req = {
-            let req = AtomicRequest::build_request(
+            let mut req = AtomicRequest::build_request(
                 &prop_mapping,
                 self.crtc,
                 Some(pending.blob),
@@ -790,6 +827,9 @@ impl AtomicDrmSurface {
                 removed,
                 &*planes,
             )?;
+            for (conn, name, value) in &pending.conn_props {
+                req.set_connector_prop(*conn, name, *value)?;
+            }
 
             if let Err(err) = self.fd.atomic_commit(
                 AtomicCommitFlags::ALLOW_MODESET | AtomicCommitFlags::TEST_ONLY,
@@ -1158,6 +1198,17 @@ impl<'a> AtomicRequest<'a> {
         Ok(())
     }
 
+    fn set_connector_prop(
+        &mut self,
+        conn: connector::Handle,
+        name: &'static str,
+        value: property::Value<'static>,
+    ) -> Result<(), Error> {
+        self.mapping.conn_prop_handle(conn, name)?;
+        self.connector_props.entry(conn).or_default().insert(name, value);
+        Ok(())
+    }
+
     fn set_crtc(
         &mut self,
         crtc: crtc::Handle,
@@ -1366,6 +1417,17 @@ impl<'a> AtomicRequest<'a> {
             self.mapping.conn_prop_handle(conn, "CRTC_ID")?,
             property::Value::CRTC(None),
         );
+        Ok(())
+    }
+
+    fn set_connector_prop(
+        &mut self,
+        conn: connector::Handle,
+        name: &'static str,
+        value: property::Value<'static>,
+    ) -> Result<(), Error> {
+        self.request
+            .add_property(conn, self.mapping.conn_prop_handle(conn, name)?, value);
         Ok(())
     }
 

@@ -365,6 +365,35 @@ impl DrmSurface {
         }
     }
 
+    /// Set (or with `None` drop) an extra connector property — `Colorspace`, `max bpc`,
+    /// `HDR_OUTPUT_METADATA` (blob id) and the like — applied with the next frame as a full commit.
+    /// Atomic API only; the legacy API has no way to set them and answers
+    /// [`Error::UnknownProperty`].
+    pub fn set_connector_property(
+        &self,
+        conn: connector::Handle,
+        name: &'static str,
+        value: Option<drm::control::property::Value<'static>>,
+    ) -> Result<(), Error> {
+        match &*self.internal {
+            DrmSurfaceInternal::Atomic(surf) => surf.set_connector_property(conn, name, value),
+            DrmSurfaceInternal::Legacy(_) => Err(Error::UnknownProperty {
+                handle: conn.into(),
+                name,
+            }),
+        }
+    }
+
+    /// Extra connector properties pending for the next commit (atomic API only).
+    pub fn connector_properties(
+        &self,
+    ) -> Vec<(connector::Handle, &'static str, drm::control::property::Value<'static>)> {
+        match &*self.internal {
+            DrmSurfaceInternal::Atomic(surf) => surf.connector_properties(),
+            DrmSurfaceInternal::Legacy(_) => Vec::new(),
+        }
+    }
+
     /// Test a state given a set of framebuffers.
     ///
     /// *Note*: This will always return `Ok` for legacy devices if `allow_modeset = false`.
