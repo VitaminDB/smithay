@@ -150,7 +150,7 @@ use crate::backend::renderer::{
 use crate::{
     backend::{
         allocator::{
-            dmabuf::{AsDmabuf, Dmabuf},
+            dmabuf::{AsDmabuf, Dmabuf, DmabufMapping, DmabufMappingMode, DmabufSyncFlags},
             format::{get_opaque, has_alpha},
             gbm::{GbmAllocator, GbmBuffer, GbmBufferFlags, GbmDevice},
             Allocator, Buffer, Slot, Swapchain,
@@ -1081,6 +1081,11 @@ where
 
     debug_flags: DebugFlags,
     span: tracing::Span,
+
+    /// FB_DAMAGE_CLIPS of the primary plane from the actual pixel difference to the previous frame
+    exact_damage: bool,
+    /// The next frame sends the whole rendered damage (after a buffer reset)
+    exact_damage_full: bool,
 }
 
 impl<A, F, U, G> DrmCompositor<A, F, U, G>
@@ -1244,6 +1249,8 @@ where
                     let drm_renderer = DrmCompositor {
                         primary_plane_element_id: Id::new(),
                         primary_plane_damage_bag: DamageBag::new(4),
+                        exact_damage: false,
+                        exact_damage_full: false,
                         primary_is_opaque: is_opaque,
                         reset_pending: true,
                         signaled_fence,
@@ -1426,6 +1433,8 @@ where
         let drm_renderer = DrmCompositor {
             primary_plane_element_id: Id::new(),
             primary_plane_damage_bag: DamageBag::new(4),
+            exact_damage: false,
+            exact_damage_full: false,
             primary_is_opaque: is_opaque,
             reset_pending: true,
             signaled_fence,
@@ -2284,6 +2293,8 @@ where
 
             // restore the renderer debug flags
             renderer.set_debug_flags(renderer_debug_flags);
+            // the buffer is read back for the exact damage below
+            drop(framebuffer);
 
             match render_res {
                 Ok(render_output_result) => {
@@ -2326,18 +2337,48 @@ where
                     let config = primary_plane_state.config.as_mut().unwrap();
 
                     if !had_direct_scan_out {
-                        if let Some(render_damage) = render_output_result.damage {
+                        // Render damage is in output space (transformed size); the plane's framebuffer
+                        // and FB_DAMAGE_CLIPS are in buffer space — apply the render transform like the
+                        // renderers do. Otherwise a rotated output only damages a clipped, unrotated part
+                        // of the buffer (drivers that copy damage only, e.g. simpledrm, show stale pixels).
+                        let render_damage = render_output_result.damage.map(|render_damage| {
                             trace!("rendering damage: {:?}", render_damage);
-
-                            // Render damage is in output space (transformed size); the plane's framebuffer
-                            // and FB_DAMAGE_CLIPS are in buffer space — apply the render transform like the
-                            // renderers do. Otherwise a rotated output only damages a clipped, unrotated part
-                            // of the buffer (drivers that copy damage only, e.g. simpledrm, show stale pixels).
-                            let render_damage: Vec<Rectangle<i32, Physical>> = render_damage
+                            render_damage
                                 .iter()
                                 .map(|d| output_transform.transform_rect_in(*d, &output_geometry.size))
-                                .collect();
-
+                                .collect::<Vec<Rectangle<i32, Physical>>>()
+                        });
+                        // Exact damage: what really changed against the previous frame (see `set_exact_damage`)
+                        let exact_full =
+                            render_damage.is_some() && std::mem::take(&mut self.exact_damage_full);
+                        let render_damage = match render_damage {
+                            Some(render_damage) if self.exact_damage && !exact_full => {
+                                let previous = previous_state
+                                    .plane_state(self.surface.plane())
+                                    .and_then(|state| state.config.as_ref())
+                                    .and_then(|c| match &c.buffer.buffer {
+                                        ScanoutBuffer::Swapchain(slot) => Some(slot),
+                                        _ => None,
+                                    });
+                                let current = match &config.buffer.buffer {
+                                    ScanoutBuffer::Swapchain(slot) => Some(slot),
+                                    _ => None,
+                                };
+                                let _ = render_output_result.sync.wait();
+                                match previous
+                                    .zip(current)
+                                    .and_then(|(p, c)| exact_primary_damage(p, c, &render_damage))
+                                {
+                                    Some(exact) => {
+                                        trace!("exact damage: {:?}", exact);
+                                        Some(exact).filter(|d| !d.is_empty())
+                                    }
+                                    None => Some(render_damage),
+                                }
+                            }
+                            other => other,
+                        };
+                        if let Some(render_damage) = render_damage {
                             self.primary_plane_damage_bag.add(render_damage.iter().map(|d| {
                                 d.to_logical(1).to_buffer(1, Transform::Normal, &current_size.to_logical(1))
                             }));
@@ -2660,6 +2701,22 @@ where
     /// Reset the underlying buffers
     pub fn reset_buffers(&mut self) {
         self.swapchain.reset_buffers();
+        self.exact_damage_full = true;
+    }
+
+    /// Compute the FB_DAMAGE_CLIPS of the rendered primary plane from the pixel difference to the
+    /// previous frame instead of the rendered (buffer-age) damage.
+    ///
+    /// For drivers that copy only the damage to the panel and where every update is costly
+    /// (E Ink: an update is a visible waveform). The rendered damage of a buffer with age 2 also
+    /// contains the previous frame, and clients presenting through Vulkan/EGL damage their whole
+    /// surface: the driver would update far more than what changed. With this enabled a frame
+    /// without changed pixels is not committed at all. Works only for linear swapchain buffers
+    /// with 4 bytes per pixel (other buffers keep the rendered damage); costs a CPU read of the
+    /// damaged region of both buffers.
+    pub fn set_exact_damage(&mut self, enabled: bool) {
+        self.exact_damage = enabled;
+        self.exact_damage_full = true;
     }
 
     /// Reset the age for all buffers.
@@ -4477,4 +4534,149 @@ fn drm_compositor_is_send() {
 
     is_send::<DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>>(
     );
+}
+
+/// Cached CPU mapping of a swapchain buffer for [`DrmCompositor::set_exact_damage`]
+struct ExactDamageMapping(Option<DmabufMapping>);
+
+/// Bounding boxes of the pixels that differ between the previous and the current primary buffer
+/// inside the rendered `damage` (buffer space). `None` — the buffers can not be compared.
+fn exact_primary_damage<B: Buffer + AsDmabuf>(
+    previous: &Slot<B>,
+    current: &Slot<B>,
+    damage: &[Rectangle<i32, Physical>],
+) -> Option<Vec<Rectangle<i32, Physical>>> {
+    let map = |slot: &Slot<B>| -> Option<(Dmabuf, *const u8, usize)> {
+        let dmabuf = slot.export().ok()?;
+        slot.userdata()
+            .insert_if_missing(|| ExactDamageMapping(dmabuf.map_plane(0, DmabufMappingMode::READ).ok()));
+        let mapping = slot.userdata().get::<ExactDamageMapping>()?.0.as_ref()?;
+        Some((dmabuf, mapping.ptr() as *const u8, mapping.length()))
+    };
+    let (pd, pp, plen) = map(previous)?;
+    let (cd, cp, clen) = map(current)?;
+    if pp == cp {
+        return None;
+    }
+    let format = cd.format();
+    let four_bytes = matches!(
+        format.code,
+        DrmFourcc::Xrgb8888
+            | DrmFourcc::Argb8888
+            | DrmFourcc::Xbgr8888
+            | DrmFourcc::Abgr8888
+            | DrmFourcc::Rgbx8888
+            | DrmFourcc::Rgba8888
+            | DrmFourcc::Bgrx8888
+            | DrmFourcc::Bgra8888
+            | DrmFourcc::Xrgb2101010
+            | DrmFourcc::Argb2101010
+            | DrmFourcc::Xbgr2101010
+            | DrmFourcc::Abgr2101010
+    );
+    let linear = matches!(format.modifier, DrmModifier::Linear | DrmModifier::Invalid);
+    if !four_bytes || !linear || pd.format() != format || pd.size() != cd.size() || cd.num_planes() != 1 {
+        return None;
+    }
+    let stride = cd.strides().next()? as usize;
+    let offset = cd.offsets().next()? as usize;
+    if pd.strides().next()? as usize != stride || pd.offsets().next()? as usize != offset {
+        return None;
+    }
+    let size = cd.size();
+    let end = offset + stride * size.h as usize;
+    if size.w as usize * 4 > stride || end > plen || end > clen {
+        return None;
+    }
+    let _ = pd.sync_plane(0, DmabufSyncFlags::START | DmabufSyncFlags::READ);
+    let _ = cd.sync_plane(0, DmabufSyncFlags::START | DmabufSyncFlags::READ);
+    // SAFETY: both mappings are alive (slot userdata) and cover `end` bytes; the buffers are not
+    // written while the frame is prepared
+    let (a, b) = unsafe {
+        (
+            std::slice::from_raw_parts(pp, end),
+            std::slice::from_raw_parts(cp, end),
+        )
+    };
+    let bounds = Rectangle::<i32, Physical>::from_size((size.w, size.h).into());
+    let out = damage
+        .iter()
+        .filter_map(|rect| rect.intersection(bounds))
+        .filter_map(|rect| changed_bbox(a, b, stride, offset, rect))
+        .collect();
+    let _ = pd.sync_plane(0, DmabufSyncFlags::END | DmabufSyncFlags::READ);
+    let _ = cd.sync_plane(0, DmabufSyncFlags::END | DmabufSyncFlags::READ);
+    Some(out)
+}
+
+/// Bounding box of the differing 4-byte pixels of `a` and `b` inside `rect`
+fn changed_bbox(
+    a: &[u8],
+    b: &[u8],
+    stride: usize,
+    offset: usize,
+    rect: Rectangle<i32, Physical>,
+) -> Option<Rectangle<i32, Physical>> {
+    let (x1, x2) = (rect.loc.x as usize, (rect.loc.x + rect.size.w) as usize);
+    // changed columns [lo, hi), rows [y_lo, y_hi)
+    let (mut lo, mut hi) = (x2, x1);
+    let (mut y_lo, mut y_hi) = (None, 0);
+    for y in rect.loc.y..rect.loc.y + rect.size.h {
+        let base = offset + y as usize * stride;
+        let ra = &a[base + x1 * 4..base + x2 * 4];
+        let rb = &b[base + x1 * 4..base + x2 * 4];
+        if ra == rb {
+            continue;
+        }
+        y_lo.get_or_insert(y);
+        y_hi = y + 1;
+        // only the parts outside the columns found so far
+        let l = (lo - x1) * 4;
+        if let Some(i) = ra[..l].iter().zip(&rb[..l]).position(|(p, q)| p != q) {
+            lo = x1 + i / 4;
+        }
+        let r = (hi.max(lo) - x1) * 4;
+        if let Some(i) = ra[r..].iter().zip(&rb[r..]).rposition(|(p, q)| p != q) {
+            hi = x1 + (r + i) / 4 + 1;
+        }
+    }
+    let y_lo = y_lo?;
+    Some(Rectangle::new(
+        (lo as i32, y_lo).into(),
+        ((hi - lo) as i32, y_hi - y_lo).into(),
+    ))
+}
+
+#[cfg(test)]
+mod exact_damage_tests {
+    use super::changed_bbox;
+    use crate::utils::{Physical, Rectangle};
+
+    #[test]
+    fn bbox_of_changed_pixels() {
+        let (w, h, stride) = (16usize, 8usize, 16 * 4 + 8);
+        let a = vec![0u8; stride * h];
+        let mut b = a.clone();
+        let full = Rectangle::<i32, Physical>::from_size((w as i32, h as i32).into());
+        assert_eq!(changed_bbox(&a, &b, stride, 0, full), None);
+        // two pixels: (3,2) and (9,5)
+        b[2 * stride + 3 * 4 + 1] = 1;
+        b[5 * stride + 9 * 4 + 3] = 1;
+        assert_eq!(
+            changed_bbox(&a, &b, stride, 0, full),
+            Some(Rectangle::new((3, 2).into(), (7, 4).into()))
+        );
+        // a rect that sees only the second one
+        let part = Rectangle::new((8, 3).into(), (8, 5).into());
+        assert_eq!(
+            changed_bbox(&a, &b, stride, 0, part),
+            Some(Rectangle::new((9, 5).into(), (1, 1).into()))
+        );
+        // a pixel left of the first one, on a later row
+        b[6 * stride + 4 + 2] = 7;
+        assert_eq!(
+            changed_bbox(&a, &b, stride, 0, full),
+            Some(Rectangle::new((1, 2).into(), (9, 5).into()))
+        );
+    }
 }
