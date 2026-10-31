@@ -314,6 +314,18 @@ impl TabletToolHandle {
         self.inner.lock().unwrap().instances.push(wl_tool.downgrade());
     }
 
+    /// Whether the client owning `surface` has an instance of this tool, i.e. it speaks
+    /// tablet-v2 and will receive this tool's events (lets the compositor emulate a pointer
+    /// for clients that don't).
+    pub fn has_instance_for(&self, surface: &WlSurface) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .instances
+            .iter()
+            .any(|i| i.id().same_client_as(&surface.id()) && i.upgrade().is_ok())
+    }
+
     /// Notify that this tool is focused on a certain surface.
     ///
     /// You provide the location of the tool, in the form of:
