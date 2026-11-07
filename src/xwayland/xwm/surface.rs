@@ -317,7 +317,12 @@ impl X11Surface {
                 .height(rect.size.h as u32)
                 .border_width(0);
             if let Some(frame) = state.mapped_onto {
+                // The client window always sits at the frame's origin. Resizing the frame moves its
+                // child according to the child's win_gravity (e.g. CenterGravity shifts it by half the
+                // size difference), so the position is reset together with the size.
                 let win_aux = ConfigureWindowAux::default()
+                    .x(0)
+                    .y(0)
                     .width(rect.size.w as u32)
                     .height(rect.size.h as u32)
                     .border_width(0);
