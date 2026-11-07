@@ -61,6 +61,9 @@ pub(crate) struct SharedSurfaceState {
     pub(super) wl_surface_serial: Option<u64>,
     pub(super) mapped_onto: Option<X11Window>,
     pub(super) geometry: Rectangle<i32, Logical>,
+    /// Exact client-side size last set together with `geometry` via
+    /// `configure_with_client_size`; reused by configures that only repeat `geometry`.
+    client_size: Option<Size<i32, Client>>,
     pub(super) override_redirect: bool,
 
     // The associated wl_surface.
@@ -180,6 +183,7 @@ impl X11Surface {
                 wl_surface: None,
                 mapped_onto: None,
                 geometry,
+                client_size: None,
                 override_redirect,
                 title: String::from(""),
                 class: String::from(""),
@@ -307,6 +311,14 @@ impl X11Surface {
                 .unwrap_or(1.);
             let logical_rect = rect.unwrap_or(state.geometry);
             let mut rect = logical_rect.to_client_precise_round(client_scale);
+            // Repeating the current geometry (e.g. the synthetic configure after a
+            // ConfigureRequest) keeps the exact client size the compositor chose,
+            // instead of re-rounding the logical size (667 * 2.25 = 1501 on a 1500 px screen).
+            let client_size = client_size.or_else(|| {
+                (logical_rect.size == state.geometry.size)
+                    .then_some(state.client_size)
+                    .flatten()
+            });
             if let Some(size) = client_size {
                 rect.size = size;
             }
@@ -335,6 +347,7 @@ impl X11Surface {
             conn.flush()?;
 
             state.geometry = logical_rect;
+            state.client_size = client_size;
         }
         Ok(())
     }
