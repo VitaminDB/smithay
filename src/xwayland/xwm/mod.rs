@@ -196,6 +196,7 @@ mod atoms {
             _NET_ACTIVE_WINDOW,
             _NET_CLIENT_LIST,
             _NET_CLIENT_LIST_STACKING,
+            _NET_WM_WINDOW_OPACITY,
             _NET_WM_PING,
             _NET_WM_STATE,
             _NET_WM_STATE_MAXIMIZED_VERT,

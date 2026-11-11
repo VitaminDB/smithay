@@ -74,6 +74,7 @@ pub(crate) struct SharedSurfaceState {
     instance: String,
     startup_id: Option<String>,
     pid: Option<u32>,
+    opacity: Option<u32>,
     protocols: Protocols,
     hints: Option<WmHints>,
     normal_hints: Option<WmSizeHints>,
@@ -150,6 +151,8 @@ pub enum WmWindowProperty {
     MotifHints,
     StartupId,
     Pid,
+    /// `_NET_WM_WINDOW_OPACITY`
+    Opacity,
 }
 
 impl X11Surface {
@@ -190,6 +193,7 @@ impl X11Surface {
                 instance: String::from(""),
                 startup_id: None,
                 pid: None,
+                opacity: None,
                 protocols: Vec::new(),
                 hints: None,
                 normal_hints: None,
@@ -413,6 +417,15 @@ impl X11Surface {
     /// Returns the PID of the underlying X11 window
     pub fn pid(&self) -> Option<u32> {
         self.state.lock().unwrap().pid
+    }
+
+    /// Returns the `_NET_WM_WINDOW_OPACITY` of the underlying X11 window (0 = transparent, `u32::MAX` = opaque),
+    /// `None` if it is not set
+    ///
+    /// Wine keeps its hidden helper windows mapped with opacity 0 (the parent of off-screen GL windows); a
+    /// compositor that draws them shows their contents over the program.
+    pub fn opacity(&self) -> Option<u32> {
+        self.state.lock().unwrap().opacity
     }
 
     /// Returns if the window is considered to be a popup.
@@ -704,6 +717,7 @@ impl X11Surface {
         self.update_motif_hints()?;
         self.update_startup_id()?;
         self.update_pid()?;
+        self.update_opacity()?;
         Ok(())
     }
 
@@ -748,6 +762,10 @@ impl X11Surface {
             atom if atom == self.atoms._NET_WM_PID => {
                 self.update_pid()?;
                 Ok(Some(WmWindowProperty::Pid))
+            }
+            atom if atom == self.atoms._NET_WM_WINDOW_OPACITY => {
+                self.update_opacity()?;
+                Ok(Some(WmWindowProperty::Opacity))
             }
 
             _ => Ok(None), // unknown
@@ -836,6 +854,12 @@ impl X11Surface {
             let mut state = self.state.lock().unwrap();
             state.pid = Some(pid);
         }
+        Ok(())
+    }
+
+    fn update_opacity(&self) -> Result<(), ConnectionError> {
+        let opacity = self.read_window_property_u32(self.atoms._NET_WM_WINDOW_OPACITY)?;
+        self.state.lock().unwrap().opacity = opacity;
         Ok(())
     }
 
