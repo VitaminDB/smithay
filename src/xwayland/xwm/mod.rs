@@ -1473,6 +1473,13 @@ where
                 geometry,
             );
             surface.update_properties()?;
+            // XShape: the bounding region now and on every change (ShapeNotify)
+            {
+                use x11rb::protocol::shape::ConnectionExt as _;
+                if conn.shape_select_input(n.window, true).is_ok() {
+                    let _ = surface.update_shape();
+                }
+            }
             xwm.windows.push(surface.clone());
 
             drop(_guard);
@@ -2241,6 +2248,15 @@ where
                 if let Some(property) = surface.update_property(n.atom)? {
                     drop(_guard);
                     state.property_notify(xwm_id, surface, property);
+                }
+            }
+        }
+        Event::ShapeNotify(n) => {
+            if n.shape_kind == x11rb::protocol::shape::SK::BOUNDING {
+                if let Some(surface) = xwm.windows.iter().find(|x| x.window_id() == n.affected_window).cloned() {
+                    surface.update_shape()?;
+                    drop(_guard);
+                    state.property_notify(xwm_id, surface, WmWindowProperty::Shape);
                 }
             }
         }

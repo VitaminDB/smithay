@@ -75,6 +75,8 @@ pub(crate) struct SharedSurfaceState {
     startup_id: Option<String>,
     pid: Option<u32>,
     opacity: Option<u32>,
+    /// XShape bounding region (client coordinates, relative to the window); `None` — not shaped
+    shape: Option<Vec<Rectangle<i32, Client>>>,
     protocols: Protocols,
     hints: Option<WmHints>,
     normal_hints: Option<WmSizeHints>,
@@ -153,6 +155,8 @@ pub enum WmWindowProperty {
     Pid,
     /// `_NET_WM_WINDOW_OPACITY`
     Opacity,
+    /// XShape bounding region changed (ShapeNotify) — see [`X11Surface::bounding_shape`]
+    Shape,
 }
 
 impl X11Surface {
@@ -194,6 +198,7 @@ impl X11Surface {
                 startup_id: None,
                 pid: None,
                 opacity: None,
+                shape: None,
                 protocols: Vec::new(),
                 hints: None,
                 normal_hints: None,
@@ -426,6 +431,42 @@ impl X11Surface {
     /// compositor that draws them shows their contents over the program.
     pub fn opacity(&self) -> Option<u32> {
         self.state.lock().unwrap().opacity
+    }
+
+    /// Returns the XShape bounding region of the underlying X11 window in logical coordinates relative to the
+    /// window, `None` if the window is not shaped (draw it whole)
+    ///
+    /// Xwayland fills the area outside the shape (black); a compositor that does not clip a shaped window
+    /// (splash screens with an image mask: DaVinci Resolve) shows that area as a black rectangle.
+    pub fn bounding_shape(&self) -> Option<Vec<Rectangle<i32, Logical>>> {
+        let scale = self.client_scale.as_ref().map(|s| s.load(Ordering::Acquire)).unwrap_or(1.0);
+        let state = self.state.lock().unwrap();
+        state.shape.as_ref().map(|rects| rects.iter().map(|r| r.to_f64().to_logical(scale).to_i32_round()).collect())
+    }
+
+    /// Re-read the XShape bounding region (on creation and on ShapeNotify).
+    pub(crate) fn update_shape(&self) -> Result<(), ConnectionError> {
+        use x11rb::protocol::shape::{ConnectionExt as _, SK};
+        let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
+        let shaped = match conn.shape_query_extents(self.window)?.reply() {
+            Ok(r) => r.bounding_shaped,
+            Err(_) => false,
+        };
+        let shape = if shaped {
+            match conn.shape_get_rectangles(self.window, SK::BOUNDING)?.reply() {
+                Ok(r) => Some(
+                    r.rectangles
+                        .iter()
+                        .map(|r| Rectangle::new((r.x as i32, r.y as i32).into(), (r.width as i32, r.height as i32).into()))
+                        .collect(),
+                ),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        self.state.lock().unwrap().shape = shape;
+        Ok(())
     }
 
     /// Returns if the window is considered to be a popup.
