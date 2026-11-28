@@ -160,7 +160,7 @@ where
                     },
                 );
                 handle.add_instance(&instance);
-                if input_method_handle.has_instance() {
+                if input_method_handle.has_instance() || handle.without_input_method() {
                     handle.enter();
                 }
             }

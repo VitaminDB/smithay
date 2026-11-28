@@ -186,8 +186,9 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for WlSurface {
         // text-input global bound due to clients doing lazy global binding.
         text_input.set_focus(Some(self.clone()));
 
-        // Only notify on `enter` once we have an actual IME.
-        if input_method.has_instance() {
+        // Only notify on `enter` once we have an actual IME (or the compositor
+        // commits strings itself without one).
+        if input_method.has_instance() || text_input.without_input_method() {
             text_input.enter();
         }
     }
@@ -200,6 +201,8 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for WlSurface {
 
         if input_method.has_instance() {
             input_method.deactivate_input_method(state);
+            text_input.leave();
+        } else if text_input.without_input_method() {
             text_input.leave();
         }
 

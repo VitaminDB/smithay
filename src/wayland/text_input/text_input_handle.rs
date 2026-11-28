@@ -19,6 +19,7 @@ pub(crate) struct TextInput {
     instances: Vec<Instance>,
     focus: Option<WlSurface>,
     active_text_input_id: Option<ObjectId>,
+    without_input_method: bool,
 }
 
 impl TextInput {
@@ -90,6 +91,21 @@ impl TextInputHandle {
         {
             instance.serial += 1
         }
+    }
+
+    /// Let text-input work without a running input method: `enter`/`leave`
+    /// follow the keyboard focus and `enable`/`commit` are accepted, so the
+    /// compositor itself can commit strings to the focused field
+    /// ([`TextInputHandle::with_active_text_input`] + `commit_string`), e.g.
+    /// characters missing from the keyboard layouts typed by an automation
+    /// tool or an on-screen keyboard. Off by default (upstream behaviour).
+    pub fn set_without_input_method(&self, on: bool) {
+        self.inner.lock().unwrap().without_input_method = on;
+    }
+
+    /// Whether text-input works without a running input method.
+    pub fn without_input_method(&self) -> bool {
+        self.inner.lock().unwrap().without_input_method
     }
 
     /// Return the currently focused surface.
@@ -209,8 +225,9 @@ where
             data.handle.increment_serial(resource);
         }
 
-        // Discard requsets without any active input method instance.
-        if !data.input_method_handle.has_instance() {
+        // Discard requsets without any active input method instance (unless the
+        // compositor commits strings itself, see `set_without_input_method`).
+        if !data.input_method_handle.has_instance() && !data.handle.without_input_method() {
             debug!("discarding text-input request without IME running");
             return;
         }
